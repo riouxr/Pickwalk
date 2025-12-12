@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Screen-Based Vertex/Face Walker",
-    "author": "ChatGPT",
-    "version": (3, 1),
-    "blender": (4, 2, 0),  # Updated min version for extension support
-    "location": "Edit Mode > CTRL + Arrow Keys",
-    "description": "Pick-walk vertices or faces based on screen direction (per-element walking)",
+    "name": "Screen-Based Vertex/Face Walker (Gesture)",
+    "author": "Blender Bob & ChatGPT",
+    "version": (4, 0),
+    "blender": (4, 2, 0),
+    "location": "Edit Mode > CTRL + MMB swipe",
+    "description": "Pick-walk vertices or faces based on screen direction using a mouse gesture",
     "category": "Mesh",
 }
 
@@ -14,46 +14,11 @@ from bpy_extras import view3d_utils
 
 
 # ============================================================
-# Addon Preferences (keys only)
-# ============================================================
-
-class VWALK_Preferences(bpy.types.AddonPreferences):
-    bl_idname = __package__  # Dynamic for extensions (matches manifest id)
-
-    key_items = [
-        ('UP_ARROW', "Up Arrow", ""),
-        ('DOWN_ARROW', "Down Arrow", ""),
-        ('LEFT_ARROW', "Left Arrow", ""),
-        ('RIGHT_ARROW', "Right Arrow", ""),
-        ('W', "W Key", ""),
-        ('A', "A Key", ""),
-        ('S', "S Key", ""),
-        ('D', "D Key", ""),
-        ('NUMPAD_8', "Numpad 8", ""),
-        ('NUMPAD_2', "Numpad 2", ""),
-        ('NUMPAD_4', "Numpad 4", ""),
-        ('NUMPAD_6', "Numpad 6", ""),
-    ]
-
-    key_up: bpy.props.EnumProperty(name="Move Up", items=key_items, default='UP_ARROW')
-    key_down: bpy.props.EnumProperty(name="Move Down", items=key_items, default='DOWN_ARROW')
-    key_left: bpy.props.EnumProperty(name="Move Left", items=key_items, default='LEFT_ARROW')
-    key_right: bpy.props.EnumProperty(name="Move Right", items=key_items, default='RIGHT_ARROW')
-
-    def draw(self, context):
-        col = self.layout.column()
-        col.label(text="Pick-Walk Keys:")
-        col.prop(self, "key_up")
-        col.prop(self, "key_down")
-        col.prop(self, "key_left")
-        col.prop(self, "key_right")
-
-
-# ============================================================
 # View helpers
 # ============================================================
 
 def get_view_region_rv3d(context):
+    """Return (region, rv3d) for the first VIEW_3D window region."""
     win = context.window
     if not win:
         return None, None
@@ -70,12 +35,16 @@ def get_view_region_rv3d(context):
 # ============================================================
 
 def walk_single_vertex(v, bm, mw, region, rv3d, direction_vector):
-    """Return the best neighbor vert for v in given direction, or None."""
+    """
+    Return the best neighbor vert for v in given direction,
+    using strict quadrant logic.
+    """
     aworld = mw @ v.co
     a2d = view3d_utils.location_3d_to_region_2d(region, rv3d, aworld)
     if a2d is None:
         return None
 
+    dir_x, dir_y = direction_vector
     best = None
     best_score = None
 
@@ -87,14 +56,28 @@ def walk_single_vertex(v, bm, mw, region, rv3d, direction_vector):
             continue
 
         delta = v2d - a2d
-        if delta.length == 0:
-            continue
+        dx, dy = delta.x, delta.y
 
-        dot = delta.normalized().dot(direction_vector)
-        if dot < 0.3:
-            continue
+        # Strict quadrant filtering
+        if dir_y > 0:  # UP
+            if dy <= 0 or abs(dy) < abs(dx):
+                continue
+        elif dir_y < 0:  # DOWN
+            if dy >= 0 or abs(dy) < abs(dx):
+                continue
+        elif dir_x < 0:  # LEFT
+            if dx >= 0 or abs(dx) < abs(dy):
+                continue
+        elif dir_x > 0:  # RIGHT
+            if dx <= 0 or abs(dx) < abs(dy):
+                continue
 
         dist = delta.length
+        if dist == 0:
+            continue
+
+        # Score: maximize direction conformity and minimize distance
+        dot = delta.normalized().dot(direction_vector)
         score = dot * 10.0 - dist
 
         if best_score is None or score > best_score:
@@ -139,7 +122,7 @@ def walk_vertices(context, direction_vector):
             if v is active:
                 active_target = target
 
-    # Build final selection (Q2 = M3):
+    # Build final selection:
     # - moved verts → replaced by their targets
     # - non-moved verts → stay selected where they are
     final_selection = set(origin_set - moved_origins) | target_verts
@@ -179,20 +162,25 @@ def walk_vertices(context, direction_vector):
 # ============================================================
 
 def walk_single_face(f, bm, mw, region, rv3d, direction_vector):
-    """Return the best neighbor face for f in given direction, or None."""
+    """
+    Return the best neighbor face for f in given direction,
+    using strict quadrant logic.
+    """
     aworld = mw @ f.calc_center_median()
     a2d = view3d_utils.location_3d_to_region_2d(region, rv3d, aworld)
     if a2d is None:
         return None
 
+    dir_x, dir_y = direction_vector
+    best = None
+    best_score = None
+
+    # Collect neighbors
     neighbor_faces = set()
     for e in f.edges:
         for nf in e.link_faces:
             if nf is not f:
                 neighbor_faces.add(nf)
-
-    best = None
-    best_score = None
 
     for nf in neighbor_faces:
         fworld = mw @ nf.calc_center_median()
@@ -201,14 +189,28 @@ def walk_single_face(f, bm, mw, region, rv3d, direction_vector):
             continue
 
         delta = f2d - a2d
-        if delta.length == 0:
-            continue
+        dx, dy = delta.x, delta.y
 
-        dot = delta.normalized().dot(direction_vector)
-        if dot < 0.3:
-            continue
+        # Strict quadrant filtering
+        if dir_y > 0:  # UP
+            if dy <= 0 or abs(dy) < abs(dx):
+                continue
+        elif dir_y < 0:  # DOWN
+            if dy >= 0 or abs(dy) < abs(dx):
+                continue
+        elif dir_x < 0:  # LEFT
+            if dx >= 0 or abs(dx) < abs(dy):
+                continue
+        elif dir_x > 0:  # RIGHT
+            if dx <= 0 or abs(dx) < abs(dy):
+                continue
 
         dist = delta.length
+        if dist == 0:
+            continue
+
+        # Score inside allowed quadrant
+        dot = delta.normalized().dot(direction_vector)
         score = dot * 10.0 - dist
 
         if best_score is None or score > best_score:
@@ -283,7 +285,7 @@ def walk_faces(context, direction_vector):
 
 
 # ============================================================
-# Dispatcher with MIX2 rule
+# Dispatcher (MIX2 rule preserved)
 # ============================================================
 
 def walk_dispatch(op, context, direction_vector):
@@ -305,28 +307,21 @@ def walk_dispatch(op, context, direction_vector):
     selected_verts = [v for v in bm.verts if v.select]
     selected_faces = [f for f in bm.faces if f.select]
 
-    # -------------------------------------------------------
-    # 1) Pure vertex mode: ignore any face selection entirely
-    # -------------------------------------------------------
+    # 1) Pure vertex mode: ignore face selection
     if vert_mode and not face_mode:
         if not selected_verts:
             op.report({'WARNING'}, "No vertices selected.")
             return {'CANCELLED'}
         return walk_vertices(context, direction_vector)
 
-    # -------------------------------------------------------
-    # 2) Pure face mode: ignore any vertex selection entirely
-    # -------------------------------------------------------
+    # 2) Pure face mode: ignore vertex selection
     if face_mode and not vert_mode:
         if not selected_faces:
             op.report({'WARNING'}, "No faces selected.")
             return {'CANCELLED'}
         return walk_faces(context, direction_vector)
 
-    # -------------------------------------------------------
-    # 3) Both vertex and face mode enabled (rare but possible)
-    #    Here we enforce MIX2: disallow true mixed selection.
-    # -------------------------------------------------------
+    # 3) Both vertex and face mode enabled (MIX2 rule)
     if vert_mode and face_mode:
         if selected_verts and selected_faces:
             op.report(
@@ -336,58 +331,74 @@ def walk_dispatch(op, context, direction_vector):
             )
             return {'CANCELLED'}
 
-        # If only verts are actually selected, walk verts
         if selected_verts:
             return walk_vertices(context, direction_vector)
 
-        # If only faces are actually selected, walk faces
         if selected_faces:
             return walk_faces(context, direction_vector)
 
         op.report({'WARNING'}, "Nothing selected.")
         return {'CANCELLED'}
 
-    # -------------------------------------------------------
     # 4) No vertex or face mode apparently active
-    # -------------------------------------------------------
     op.report({'WARNING'}, "Use Vertex or Face select mode.")
     return {'CANCELLED'}
 
 
 # ============================================================
-# Operators
+# Gesture operator (CTRL + MMB, 4 directions)
 # ============================================================
 
-class VWALK_OT_up(bpy.types.Operator):
-    bl_idname = "mesh.vwalk_up"
-    bl_label = "Walk Up"
+class VWALK_OT_gesture(bpy.types.Operator):
+    bl_idname = "mesh.vwalk_gesture"
+    bl_label = "Gesture Pick Walk"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
 
-    def execute(self, context):
-        return walk_dispatch(self, context, (0, 1))
+    start_mouse: bpy.props.IntVectorProperty(size=2)
 
+    def modal(self, context, event):
+        # ESC / RMB: cancel
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            return {'CANCELLED'}
 
-class VWALK_OT_down(bpy.types.Operator):
-    bl_idname = "mesh.vwalk_down"
-    bl_label = "Walk Down"
+        # MMB release ends the gesture
+        if event.type == 'MIDDLEMOUSE' and event.value == 'RELEASE':
+            dx = event.mouse_region_x - self.start_mouse[0]
+            dy = event.mouse_region_y - self.start_mouse[1]
 
-    def execute(self, context):
-        return walk_dispatch(self, context, (0, -1))
+            # Ignore tiny movements
+            if abs(dx) < 6 and abs(dy) < 6:
+                return {'CANCELLED'}
 
+            # Determine primary direction (4-way)
+            if abs(dx) > abs(dy):
+                # Horizontal swipe
+                if dx > 0:
+                    direction = (1, 0)   # RIGHT / EAST
+                else:
+                    direction = (-1, 0)  # LEFT / WEST
+            else:
+                # Vertical swipe
+                if dy > 0:
+                    direction = (0, 1)   # UP / NORTH
+                else:
+                    direction = (0, -1)  # DOWN / SOUTH
 
-class VWALK_OT_left(bpy.types.Operator):
-    bl_idname = "mesh.vwalk_left"
-    bl_label = "Walk Left"
+            return walk_dispatch(self, context, direction)
 
-    def execute(self, context):
-        return walk_dispatch(self, context, (-1, 0))
+        return {'RUNNING_MODAL'}
 
+    def invoke(self, context, event):
+        if context.mode != 'EDIT_MESH':
+            self.report({'WARNING'}, "Gesture walker works only in Edit Mesh mode.")
+            return {'CANCELLED'}
 
-class VWALK_OT_right(bpy.types.Operator):
-    bl_idname = "mesh.vwalk_right"
-    bl_label = "Walk Right"
+        if event.type == 'MIDDLEMOUSE' and event.ctrl:
+            self.start_mouse = (event.mouse_region_x, event.mouse_region_y)
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
 
-    def execute(self, context):
-        return walk_dispatch(self, context, (1, 0))
+        return {'PASS_THROUGH'}
 
 
 # ============================================================
@@ -398,20 +409,19 @@ addon_keymaps = []
 
 
 def register_keymaps():
-    prefs = bpy.context.preferences.addons[__package__].preferences  # Dynamic for extensions
-    kc = bpy.context.window_manager.keyconfigs.addon
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
     if kc is None:
         return
+
     km = kc.keymaps.new(name="3D View", space_type="VIEW_3D")
-
-    def add(op, key):
-        kmi = km.keymap_items.new(op, key, 'PRESS', ctrl=True)
-        addon_keymaps.append((km, kmi))
-
-    add("mesh.vwalk_up", prefs.key_up)
-    add("mesh.vwalk_down", prefs.key_down)
-    add("mesh.vwalk_left", prefs.key_left)
-    add("mesh.vwalk_right", prefs.key_right)
+    kmi = km.keymap_items.new(
+        VWALK_OT_gesture.bl_idname,
+        'MIDDLEMOUSE',
+        'PRESS',
+        ctrl=True,
+    )
+    addon_keymaps.append((km, kmi))
 
 
 def unregister_keymaps():
@@ -425,11 +435,7 @@ def unregister_keymaps():
 # ============================================================
 
 classes = (
-    VWALK_Preferences,
-    VWALK_OT_up,
-    VWALK_OT_down,
-    VWALK_OT_left,
-    VWALK_OT_right,
+    VWALK_OT_gesture,
 )
 
 
