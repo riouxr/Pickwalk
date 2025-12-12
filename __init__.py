@@ -11,7 +11,7 @@ bl_info = {
 import bpy
 import bmesh
 from bpy_extras import view3d_utils
-
+from mathutils import Vector
 
 # ============================================================
 # View helpers
@@ -37,16 +37,25 @@ def get_view_region_rv3d(context):
 def walk_single_vertex(v, bm, mw, region, rv3d, direction_vector):
     """
     Return the best neighbor vert for v in given direction,
-    using strict quadrant logic.
+    using an angular cone around the gesture direction.
+    Works for both cardinal and diagonal directions.
     """
     aworld = mw @ v.co
     a2d = view3d_utils.location_3d_to_region_2d(region, rv3d, aworld)
     if a2d is None:
         return None
 
-    dir_x, dir_y = direction_vector
+    # Normalize the intended direction (screen space)
+    dir_vec = Vector(direction_vector)
+    if dir_vec.length == 0:
+        return None
+    dir_vec.normalize()
+
     best = None
     best_score = None
+
+    # Cosine of 45° ≈ 0.707
+    COS_HALF_ANGLE = 0.70710678
 
     for e in v.link_edges:
         nv = e.other_vert(v)
@@ -56,28 +65,21 @@ def walk_single_vertex(v, bm, mw, region, rv3d, direction_vector):
             continue
 
         delta = v2d - a2d
-        dx, dy = delta.x, delta.y
-
-        # Strict quadrant filtering
-        if dir_y > 0:  # UP
-            if dy <= 0 or abs(dy) < abs(dx):
-                continue
-        elif dir_y < 0:  # DOWN
-            if dy >= 0 or abs(dy) < abs(dx):
-                continue
-        elif dir_x < 0:  # LEFT
-            if dx >= 0 or abs(dx) < abs(dy):
-                continue
-        elif dir_x > 0:  # RIGHT
-            if dx <= 0 or abs(dx) < abs(dy):
-                continue
-
         dist = delta.length
         if dist == 0:
             continue
 
-        # Score: maximize direction conformity and minimize distance
-        dot = delta.normalized().dot(direction_vector)
+        delta_vec = Vector((delta.x, delta.y))
+        delta_vec.normalize()
+
+        # Alignment with desired direction
+        dot = delta_vec.dot(dir_vec)
+
+        # Reject neighbors outside the 45° cone, or in opposite direction
+        if dot <= COS_HALF_ANGLE:
+            continue
+
+        # Score: better alignment & closer distance is better
         score = dot * 10.0 - dist
 
         if best_score is None or score > best_score:
@@ -85,7 +87,6 @@ def walk_single_vertex(v, bm, mw, region, rv3d, direction_vector):
             best = nv
 
     return best
-
 
 def walk_vertices(context, direction_vector):
     obj = context.edit_object
@@ -164,16 +165,25 @@ def walk_vertices(context, direction_vector):
 def walk_single_face(f, bm, mw, region, rv3d, direction_vector):
     """
     Return the best neighbor face for f in given direction,
-    using strict quadrant logic.
+    using an angular cone around the gesture direction.
+    Works for both cardinal and diagonal directions.
     """
     aworld = mw @ f.calc_center_median()
     a2d = view3d_utils.location_3d_to_region_2d(region, rv3d, aworld)
     if a2d is None:
         return None
 
-    dir_x, dir_y = direction_vector
+    from mathutils import Vector
+
+    dir_vec = Vector(direction_vector)
+    if dir_vec.length == 0:
+        return None
+    dir_vec.normalize()
+
     best = None
     best_score = None
+
+    COS_HALF_ANGLE = 0.70710678  # ≈ cos(45°)
 
     # Collect neighbors
     neighbor_faces = set()
@@ -189,28 +199,18 @@ def walk_single_face(f, bm, mw, region, rv3d, direction_vector):
             continue
 
         delta = f2d - a2d
-        dx, dy = delta.x, delta.y
-
-        # Strict quadrant filtering
-        if dir_y > 0:  # UP
-            if dy <= 0 or abs(dy) < abs(dx):
-                continue
-        elif dir_y < 0:  # DOWN
-            if dy >= 0 or abs(dy) < abs(dx):
-                continue
-        elif dir_x < 0:  # LEFT
-            if dx >= 0 or abs(dx) < abs(dy):
-                continue
-        elif dir_x > 0:  # RIGHT
-            if dx <= 0 or abs(dx) < abs(dy):
-                continue
-
         dist = delta.length
         if dist == 0:
             continue
 
-        # Score inside allowed quadrant
-        dot = delta.normalized().dot(direction_vector)
+        delta_vec = Vector((delta.x, delta.y))
+        delta_vec.normalize()
+
+        dot = delta_vec.dot(dir_vec)
+
+        if dot <= COS_HALF_ANGLE:
+            continue
+
         score = dot * 10.0 - dist
 
         if best_score is None or score > best_score:
@@ -357,7 +357,7 @@ class VWALK_OT_gesture(bpy.types.Operator):
     start_mouse: bpy.props.IntVectorProperty(size=2)
 
     def modal(self, context, event):
-        # ESC / RMB: cancel
+        # ESC / RMB cancels
         if event.type in {'ESC', 'RIGHTMOUSE'}:
             return {'CANCELLED'}
 
@@ -370,21 +370,33 @@ class VWALK_OT_gesture(bpy.types.Operator):
             if abs(dx) < 6 and abs(dy) < 6:
                 return {'CANCELLED'}
 
-            # Determine primary direction (4-way)
-            if abs(dx) > abs(dy):
-                # Horizontal swipe
-                if dx > 0:
-                    direction = (1, 0)   # RIGHT / EAST
-                else:
-                    direction = (-1, 0)  # LEFT / WEST
-            else:
-                # Vertical swipe
-                if dy > 0:
-                    direction = (0, 1)   # UP / NORTH
-                else:
-                    direction = (0, -1)  # DOWN / SOUTH
+            import math
+            angle = math.atan2(dy, dx)  # radians, screen space
 
-            return walk_dispatch(self, context, direction)
+            # Define the 8 directions with their angles
+            # (vector, angle in radians)
+            directions = [
+                ((1, 0),        0),                     # East
+                ((1, 1),        math.pi / 4),           # NE
+                ((0, 1),        math.pi / 2),           # North
+                ((-1, 1),       3 * math.pi / 4),       # NW
+                ((-1, 0),       math.pi),               # West
+                ((-1, -1),     -3 * math.pi / 4),       # SW
+                ((0, -1),      -math.pi / 2),           # South
+                ((1, -1),      -math.pi / 4),           # SE
+            ]
+
+            # Pick the direction whose angle is closest to the gesture angle
+            best_vec = None
+            best_score = None
+            for vec, ang in directions:
+                diff = abs((angle - ang + math.pi) % (2 * math.pi) - math.pi)
+                score = -diff  # smaller angle difference = better
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_vec = vec
+
+            return walk_dispatch(self, context, best_vec)
 
         return {'RUNNING_MODAL'}
 
@@ -399,6 +411,7 @@ class VWALK_OT_gesture(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
+
 
 
 # ============================================================
